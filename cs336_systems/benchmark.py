@@ -8,6 +8,8 @@ import timeit
 
 
 def run_benchmark(num_layers, num_heads, d_ff, batch_size, d_model, seq_len, vocab_size, warmup, steps, mode):
+
+    device = "cuda" if t.cuda.is_available() else "cpu"
     model = BasicsTransformerLM(
         vocab_size=vocab_size, 
         context_length=seq_len, 
@@ -18,9 +20,10 @@ def run_benchmark(num_layers, num_heads, d_ff, batch_size, d_model, seq_len, voc
     )
 
     optimizer = AdamW(model.parameters())
+    model.to(device)
 
-    x = t.randint(low=0, high=vocab_size, size=(batch_size, seq_len), dtype=t.int32, device="cuda" if t.cuda.is_available() else "cpu")
-    target = t.randint(low=0, high=vocab_size, size=(batch_size, seq_len), dtype=t.int32, device="cuda" if t.cuda.is_available() else "cpu")
+    x = t.randint(low=0, high=vocab_size, size=(batch_size, seq_len), dtype=t.int32, device=device)
+    target = t.randint(low=0, high=vocab_size, size=(batch_size, seq_len), dtype=t.int32, device=device)
 
     def step():
         if mode == "forward":
@@ -36,23 +39,54 @@ def run_benchmark(num_layers, num_heads, d_ff, batch_size, d_model, seq_len, voc
             optimizer.step()
         else: 
             raise ValueError(f"Unknown mode: {mode}")
-
+# 1. 测试前环境清理
+    t.cuda.empty_cache()           # 清理之前的显存缓存
+    t.cuda.reset_peak_memory_stats() # 重置显存峰值统计
+    
+    # 2. 预热阶段 (Warmup)
     for _ in range(warmup):
         step()
-        t.cuda.synchronize()
-
-    start_time = timeit.default_timer()
-
+    t.cuda.synchronize() # 确保预热完全结束
+    
+    # 3. 初始化 CUDA 原生计时器
+    start_event = t.cuda.Event(enable_timing=True)
+    end_event = t.cuda.Event(enable_timing=True)
+    
+    # 4. 正式计时 (核心执行区)
+    start_event.record() # 记录起点
+    
     for _ in range(steps):
-        step()
-        t.cuda.synchronize()
-
-    end_time = timeit.default_timer()
-
-    time_cost = end_time - start_time
-    avg = time_cost * 1000 / steps
-
-    return avg
+        step()        # 疯狂下发任务，不进行任何同步阻塞
+        
+    end_event.record()   # 记录终点
+    
+    # 5. 统一同步，等待所有任务完成
+    t.cuda.synchronize()
+    
+    # 6. 计算详细 Benchmark 数据
+    # elapsed_time 直接返回毫秒 (ms)
+    total_time_ms = start_event.elapsed_time(end_event) 
+    avg_time_ms = total_time_ms / steps
+    
+    # 计算吞吐量 (每秒处理的样本数)
+    total_samples = steps * batch_size
+    throughput = total_samples / (total_time_ms / 1000.0) 
+    
+    # 获取显存峰值占用 (转换为 MB)
+    max_memory_mb = t.cuda.max_memory_allocated() / (1024 ** 2)
+    
+    # 7. 打印报告
+    print("="*30)
+    print("🏆 GPU Benchmark Report")
+    print("="*30)
+    print(f"Total Steps : {steps}")
+    print(f"Batch Size  : {batch_size}")
+    print("-" * 30)
+    print(f"⏱️ Total Time : {total_time_ms:.2f} ms")
+    print(f"⚡ Avg Latency: {avg_time_ms:.2f} ms / step")
+    print(f"🚀 Throughput : {throughput:.2f} samples / sec")
+    print(f"💾 Peak Memory: {max_memory_mb:.2f} MB")
+    print("="*30)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -72,7 +106,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    result = run_benchmark(
+    run_benchmark(
         num_layers=args.num_layers,
         num_heads=args.num_heads,
         d_ff=args.d_ff,
@@ -84,5 +118,3 @@ if __name__ == "__main__":
         steps=args.steps,
         mode=args.mode
     )
-
-    print(f"{result}")
