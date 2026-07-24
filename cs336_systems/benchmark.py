@@ -1,6 +1,7 @@
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.optimizer import AdamW
-from cs336_basics.nn_utils import cross_entropy
+from cs336_basics.nn_utils import cross_entropy, softmax
+
 
 import torch as t
 import argparse
@@ -25,21 +26,29 @@ def run_benchmark(num_layers, num_heads, d_ff, batch_size, d_model, seq_len, voc
     x = t.randint(low=0, high=vocab_size, size=(batch_size, seq_len), dtype=t.int32, device=device)
     target = t.randint(low=0, high=vocab_size, size=(batch_size, seq_len), dtype=t.int32, device=device)
 
+    amp_ctx = t.autocast(device_type=device, dtype=t.bfloat16)
+
     def step():
         if mode == "forward":
-            out = model(x)
+            with t.cuda.nvtx.range("Forward Pass"), amp_ctx:
+                 out = model(x)
         elif mode == "backward":
-            out = model(x)
-            loss = cross_entropy(out, target)
-            loss.backward()
+            with t.cuda.nvtx.range("Forward Pass"), amp_ctx:
+                out = model(x)
+            with t.cuda.nvtx.range("Backward Pass"):
+                loss = cross_entropy(out, target)
+                loss.backward()
         elif mode == "optimize":
-            out = model(x)
-            loss = cross_entropy(out, target)
-            loss.backward()
-            optimizer.step()
+            with t.cuda.nvtx.range("Forward Pass"), amp_ctx:
+                out = model(x)
+            with t.cuda.nvtx.range("Backward Pass"):
+                loss = cross_entropy(out, target)
+                loss.backward()
+            with t.cuda.nvtx.range("Optimizer Step"):
+                optimizer.step()
         else: 
             raise ValueError(f"Unknown mode: {mode}")
-# 1. 测试前环境清理
+    # 1. 测试前环境清理
     t.cuda.empty_cache()           # 清理之前的显存缓存
     t.cuda.reset_peak_memory_stats() # 重置显存峰值统计
     
@@ -62,7 +71,7 @@ def run_benchmark(num_layers, num_heads, d_ff, batch_size, d_model, seq_len, voc
     
     # 5. 统一同步，等待所有任务完成
     t.cuda.synchronize()
-    
+
     # 6. 计算详细 Benchmark 数据
     # elapsed_time 直接返回毫秒 (ms)
     total_time_ms = start_event.elapsed_time(end_event) 
@@ -77,15 +86,15 @@ def run_benchmark(num_layers, num_heads, d_ff, batch_size, d_model, seq_len, voc
     
     # 7. 打印报告
     print("="*30)
-    print("🏆 GPU Benchmark Report")
+    print("GPU Benchmark Report")
     print("="*30)
     print(f"Total Steps : {steps}")
     print(f"Batch Size  : {batch_size}")
     print("-" * 30)
-    print(f"⏱️ Total Time : {total_time_ms:.2f} ms")
-    print(f"⚡ Avg Latency: {avg_time_ms:.2f} ms / step")
-    print(f"🚀 Throughput : {throughput:.2f} samples / sec")
-    print(f"💾 Peak Memory: {max_memory_mb:.2f} MB")
+    print(f"Total Time : {total_time_ms:.2f} ms")
+    print(f"Avg Latency: {avg_time_ms:.2f} ms / step")
+    print(f"Throughput : {throughput:.2f} samples / sec")
+    print(f"Peak Memory: {max_memory_mb:.2f} MB")
     print("="*30)
 
 if __name__ == "__main__":
