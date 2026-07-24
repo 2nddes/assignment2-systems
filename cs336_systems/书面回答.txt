@@ -1,0 +1,22 @@
+Problem (benchmarking_mixed_precision): Benchmarking Mixed Precision (2 points):
+(a) feed-forward和logits是 FP16，其他是 FP32
+(b) BF16虽然范围更大，但是牺牲了精度，还是需要upcast
+
+Problem (gradient_checkpointing):
+(a) 峰值激活显存：O(1), 计算成本：O(N^2)
+(b) 将 N 个 Block 分成 K 个 Chunk，每个 Chunk 包含 M 个 Block，那么 K * M = N
+前向传播时，我们对每个 Chunk 调用一次 Checkpoint。这需要我们在显存中保存 K 个边界张量（每个 Chunk 的输入）。
+反向传播时，每个 Chunk 被唤醒进行重计算。为了计算这一个 Chunk 的梯度，PyTorch 会在显存中完全展开这 M 个 Block 的内部残差。
+峰值内存开销正比于：K（保存的边界数量）+ M（展开的内部残差数量）。
+根据均值不等式，当 K + M 取最小值时
+
+Problem (pytorch_attention):
+1. 核心结论：显存消耗完全由序列长度 O(N^2) 统治
+2. 对比：隐藏层维度（d_model）对显存的影响微乎其微：d_model=16 时，显存为 2113.50 MiB, d_model=128 时，显存为 2449.50 MiB
+3. 计算耗时：遭遇“内存墙 (Memory Wall)”的断崖式暴增:
+    按理说，时间复杂度也是 O(N^2)，所以当序列翻倍时，时间应该增加约 4 倍。但看真实的数据：
+    以 d_model = 64 为例：
+    seq_len = 4096 时，Bwd Time 为 ~34,810 ms
+    seq_len = 8192 时，Bwd Time 为 ~964,997 ms
+    当计算量（N^2）仅仅增加了 4 倍，反向传播耗时却暴涨了约 27 倍！
+
